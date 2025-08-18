@@ -2,6 +2,7 @@ import os
 import asyncio
 import requests
 from typing import TypedDict, Annotated, Sequence, List, Optional, Literal
+from jarvis_tts import JARVISStreamingTTS
 from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -527,60 +528,6 @@ tools = [web_search, get_weather, execute_bash, read_file, write_file, list_dire
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
 
-class JARVISTTS:
-    """Handle text-to-speech for JARVIS"""
-    
-    def __init__(self, tts_host: str):
-        self.tts_host = tts_host
-        self.is_playing = False
-        
-    def speak(self, text: str) -> None:
-        """Generate and play JARVIS speech"""
-        if not ENABLE_TTS:
-            return
-            
-        def _play_audio():
-            try:
-                self.is_playing = True
-                
-                # Request TTS
-                response = requests.post(
-                    f"{self.tts_host}/tts",
-                    json={
-                        "text": text,
-                        "exaggeration": 0.3,  # More measured for JARVIS
-                        "cfg_weight": 0.5,    # Balanced pacing
-                        "use_glados_voice": False  # Use default or JARVIS voice if available
-                    },
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    # Load audio from response
-                    audio_data = io.BytesIO(response.content)
-                    sound = pygame.mixer.Sound(audio_data)
-                    
-                    # Play and wait for completion
-                    sound.play()
-                    while pygame.mixer.get_busy():
-                        pygame.time.wait(100)
-                else:
-                    logger.error(f"TTS request failed: {response.status_code}")
-                    
-            except Exception as e:
-                logger.error(f"TTS playback error: {e}")
-            finally:
-                self.is_playing = False
-        
-        # Play audio in background thread to not block
-        audio_thread = threading.Thread(target=_play_audio)
-        audio_thread.daemon = True
-        audio_thread.start()
-    
-    def wait_for_speech(self):
-        """Wait for current speech to finish"""
-        while self.is_playing:
-            pygame.time.wait(100)
 
 def test_connections():
     global ENABLE_TTS
@@ -736,6 +683,13 @@ app = workflow.compile(
     #recursion_limit=50  # Increased from default 25
 )
 
+# Save agent graph
+image_data = app.get_graph().draw_mermaid_png()
+# Save the image data to a file
+with open("jarvis_graph.png", "wb") as f:
+    f.write(image_data)
+
+
 # Interactive shell
 async def main():
     print("🤖 JARVIS v1.0 - Just A Rather Very Intelligent System")
@@ -747,7 +701,7 @@ async def main():
         print("Shall I proceed with available functionality, Sir?")
     
     # Initialize TTS
-    tts = JARVISTTS(TTS_HOST) if ENABLE_TTS else None
+    tts = JARVISStreamingTTS(TTS_HOST) if ENABLE_TTS else None
     
     print("\n" + "=" * 60)
     
