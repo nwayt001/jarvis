@@ -25,7 +25,7 @@ app = FastAPI(title="GLaDOS TTS Server")
 
 # Global model variable
 model = None
-GLADOS_VOICE_PATH = "jarvis_sample.wav"  # Update this path
+GLADOS_VOICE_PATH = "audio_library/jarvis_sample.wav"  # Update this path
 
 class TTSRequest(BaseModel):
     text: str

@@ -25,7 +25,7 @@ app = FastAPI(title="JARVIS Streaming TTS Server")
 
 # Global model variable
 model = None
-JARVIS_VOICE_PATH = "jarvis_sample.wav"  # Update this path
+JARVIS_VOICE_PATH = "audio_library/jarvis_sample.wav"  # Update this path
 
 class TTSRequest(BaseModel):
     text: str
