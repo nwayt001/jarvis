@@ -120,16 +120,20 @@ async def generate_audio_stream(text: str, request: TTSRequest) -> AsyncGenerato
             
             # Create WAV header for float32 format (only once)
             wav_header = None
+            chunk_count = 0
             
             for audio_chunk, metrics in model.generate_stream(**generator_params):
+                chunk_count += 1
+                
                 # Log first chunk latency
                 if first_chunk and metrics.latency_to_first_chunk:
                     logger.info(f"First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
                     first_chunk = False
                 
-                # Add tiny padding to reduce boundary artifacts
-                pad = torch.zeros(1, int(model.sr * 0.003), dtype=audio_chunk.dtype, device=audio_chunk.device)
-                audio_chunk = torch.cat([audio_chunk, pad], dim=1)
+                # Add tiny padding to reduce boundary artifacts (but not for first chunk)
+                if chunk_count > 1:
+                    pad = torch.zeros(1, int(model.sr * 0.002), dtype=audio_chunk.dtype, device=audio_chunk.device)
+                    audio_chunk = torch.cat([audio_chunk, pad], dim=1)
                 
                 # Convert to consistent float32 format
                 pcm = audio_chunk.squeeze(0).detach().cpu().to(torch.float32).clamp(-1, 1)

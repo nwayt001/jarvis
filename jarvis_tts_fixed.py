@@ -163,17 +163,28 @@ class JARVISStreamingTTS:
                         # First chunk - no previous tail
                         if prev_tail is None:
                             if len(f) <= overlap:
+                                # Very short first chunk - just save it
                                 prev_tail = f.copy()
                                 return
-                            # Send everything except the last overlap samples
-                            body = f[:-overlap]
+                            
+                            # For first chunk, play everything INCLUDING overlap
+                            # (no need to hold back since there's nothing to blend with yet)
+                            # This fixes the pause after first chunk
+                            
+                            # Apply a short fade-in to avoid initial click
+                            fade_in_len = min(overlap // 2, len(f))
+                            if fade_in_len > 0:
+                                fade = np.linspace(0.0, 1.0, fade_in_len, dtype=np.float32)[:, None]
+                                f[:fade_in_len] *= fade
+                            
+                            # Save tail for next chunk
                             prev_tail = f[-overlap:].copy()
                             
-                            # Convert back to original dtype
+                            # Play the entire first chunk
                             if dtype == 'float32':
-                                write_data = np.clip(body, -1, 1)
+                                write_data = np.clip(f, -1, 1)
                             else:
-                                write_data = np.clip(body, -1, 1) * (2**(8*int(bps/8)-1)-1)
+                                write_data = np.clip(f, -1, 1) * (2**(8*int(bps/8)-1)-1)
                             
                             stream.write(self._frames_to_bytes(write_data, dtype))
                             return
