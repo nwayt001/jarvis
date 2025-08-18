@@ -16,6 +16,8 @@ import logging
 from typing import Optional, List, AsyncGenerator
 import asyncio
 import re
+import struct
+import numpy as np
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -113,24 +115,11 @@ async def generate_audio_stream(text: str, request: TTSRequest) -> AsyncGenerato
                 "chunk_size": request.chunk_size
             }
             
-            # Try without voice cloning first to avoid reference audio issues
             if request.use_jarvis_voice and os.path.exists(JARVIS_VOICE_PATH):
-                # Test if the reference audio works
-                try:
-                    logger.info(f"Testing reference audio: {JARVIS_VOICE_PATH}")
-                    # Try a quick test generation
-                    test_gen = model.generate(
-                        "Test",
-                        audio_prompt_path=JARVIS_VOICE_PATH,
-                        exaggeration=request.exaggeration,
-                        cfg_weight=request.cfg_weight
-                    )
-                    # If it works, use it for streaming
-                    generator_params["audio_prompt_path"] = JARVIS_VOICE_PATH
-                    logger.info("Reference audio validated successfully")
-                except Exception as e:
-                    logger.warning(f"Reference audio validation failed: {e}")
-                    logger.info("Proceeding without voice cloning")
+                generator_params["audio_prompt_path"] = JARVIS_VOICE_PATH
+            
+            # Create WAV header for float32 format (only once)
+            wav_header = None
             
             for audio_chunk, metrics in model.generate_stream(**generator_params):
                 # Log first chunk latency
@@ -138,17 +127,41 @@ async def generate_audio_stream(text: str, request: TTSRequest) -> AsyncGenerato
                     logger.info(f"First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
                     first_chunk = False
                 
-                # Convert chunk to WAV format and yield
-                chunk_buffer = io.BytesIO()
-                ta.save(chunk_buffer, audio_chunk, model.sr, format="wav")
-                chunk_buffer.seek(0)
+                # Add tiny padding to reduce boundary artifacts
+                pad = torch.zeros(1, int(model.sr * 0.003), dtype=audio_chunk.dtype, device=audio_chunk.device)
+                audio_chunk = torch.cat([audio_chunk, pad], dim=1)
                 
-                # Yield the audio data (skip WAV header for subsequent chunks)
-                if len(audio_chunks) == 0:
-                    yield chunk_buffer.read()  # First chunk includes header
+                # Convert to consistent float32 format
+                pcm = audio_chunk.squeeze(0).detach().cpu().to(torch.float32).clamp(-1, 1)
+                raw_bytes = pcm.numpy().astype('<f4').tobytes()  # Little-endian float32
+                
+                # First chunk: send WAV header + data
+                if wav_header is None:
+                    # Create float32 WAV header
+                    sample_rate = model.sr
+                    channels = 1
+                    bits_per_sample = 32
+                    byte_rate = sample_rate * channels * 4  # 4 bytes per float32
+                    block_align = channels * 4
+                    
+                    wav_header = b'RIFF'
+                    wav_header += b'\xff\xff\xff\xff'  # Placeholder for file size (streaming)
+                    wav_header += b'WAVE'
+                    wav_header += b'fmt '
+                    wav_header += struct.pack('<I', 16)  # fmt chunk size
+                    wav_header += struct.pack('<H', 3)   # Format: 3 = IEEE float
+                    wav_header += struct.pack('<H', channels)
+                    wav_header += struct.pack('<I', sample_rate)
+                    wav_header += struct.pack('<I', byte_rate)
+                    wav_header += struct.pack('<H', block_align)
+                    wav_header += struct.pack('<H', bits_per_sample)
+                    wav_header += b'data'
+                    wav_header += b'\xff\xff\xff\xff'  # Placeholder for data size (streaming)
+                    
+                    yield wav_header + raw_bytes
                 else:
-                    chunk_buffer.seek(44)  # Skip WAV header for subsequent chunks
-                    yield chunk_buffer.read()
+                    # Subsequent chunks: raw float32 PCM only
+                    yield raw_bytes
                 
                 audio_chunks.append(audio_chunk)
                 

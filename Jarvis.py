@@ -2,7 +2,7 @@ import os
 import asyncio
 import requests
 from typing import TypedDict, Annotated, Sequence, List, Optional, Literal
-from jarvis_tts import JARVISStreamingTTS
+from jarvis_tts_fixed import JARVISStreamingTTS
 from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder

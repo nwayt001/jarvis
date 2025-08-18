@@ -1,49 +1,62 @@
 """
-Enhanced JARVIS TTS module with streaming support
-Drop-in replacement for the JARVISTTS class with streaming capabilities
+JARVIS TTS module with true streaming support using sounddevice
+Real-time audio streaming for minimal latency
 """
-import pygame
 import requests
-import io
 import threading
 import logging
-import queue
+import struct
 import time
+import sounddevice as sd
 
 logger = logging.getLogger(__name__)
-ENABLE_TTS = True  # Set to False to disable TTS
 
-# Streaming TTS class for JARVIS
 class JARVISStreamingTTS:
-    """Handle text-to-speech for JARVIS with streaming support"""
+    """Handle text-to-speech for JARVIS with true streaming support"""
     
-    def __init__(self, tts_host: str, enable_streaming: bool = True):
+    def __init__(self, tts_host: str):
         self.tts_host = tts_host
         self.is_playing = False
-        self.enable_streaming = enable_streaming
-        self.audio_queue = queue.Queue()
         self.stop_playback = False
         
-        # Check if streaming is available
+        # Check if streaming is available on server
         try:
             response = requests.get(f"{self.tts_host}/health", timeout=2)
             if response.status_code == 200:
                 health = response.json()
                 self.streaming_available = health.get('streaming_available', False)
-                if self.streaming_available:
-                    logger.info("✅ Streaming TTS available")
-                else:
-                    logger.info("⚠️ Streaming not available, using standard TTS")
+                logger.info(f"✅ TTS Server connected - Streaming: {self.streaming_available}")
             else:
                 self.streaming_available = False
         except:
             self.streaming_available = False
+            logger.warning("⚠️ Could not connect to TTS server")
+    
+    def _parse_wav_header(self, header: bytes):
+        """Parse WAV header to extract audio format info"""
+        try:
+            # Standard WAV header parsing
+            # Offset 22: NumChannels (2 bytes)
+            # Offset 24: SampleRate (4 bytes)  
+            # Offset 34: BitsPerSample (2 bytes)
+            channels = struct.unpack_from("<H", header, 22)[0]
+            samplerate = struct.unpack_from("<I", header, 24)[0]
+            bits_per_sample = struct.unpack_from("<H", header, 34)[0]
             
-    def speak_streaming(self, text: str) -> None:
-        """Generate and play JARVIS speech with streaming"""
+            # Map bits to numpy dtype for sounddevice
+            dtype_map = {8: "int8", 16: "int16", 24: "int24", 32: "int32"}
+            dtype = dtype_map.get(bits_per_sample, "int16")
+            
+            return channels, samplerate, dtype
+        except Exception as e:
+            logger.warning(f"Failed to parse WAV header: {e}, using defaults")
+            return 1, 22050, "int16"  # Default mono 22kHz 16-bit
+    
+    def speak(self, text: str) -> None:
+        """Stream TTS audio with minimal latency"""
         if not text:
             return
-            
+        
         def _stream_audio():
             try:
                 self.is_playing = True
@@ -58,199 +71,135 @@ class JARVISStreamingTTS:
                         "cfg_weight": 0.5,
                         "use_jarvis_voice": True,
                         "stream": True,
-                        "chunk_size": 25  # Smaller chunks for lower latency
+                        "chunk_size": 25  # Small chunks for low latency
                     },
                     stream=True,
                     timeout=30
                 )
                 
-                if response.status_code == 200:
-                    # Accumulate streaming chunks
-                    audio_buffer = io.BytesIO()
-                    first_chunk = True
-                    chunk_count = 0
+                if response.status_code != 200:
+                    logger.error(f"TTS request failed: {response.status_code}")
+                    return
+                
+                response.raise_for_status()
+                iterator = response.iter_content(chunk_size=16384)
+                
+                # Read WAV header (first 44 bytes)
+                header = b""
+                while len(header) < 44:
+                    chunk = next(iterator)
+                    if not chunk:
+                        break
+                    header += chunk
+                
+                if len(header) < 44:
+                    logger.error("Incomplete WAV header")
+                    return
+                
+                # Split header and any leftover audio data
+                leftover = header[44:]
+                header = header[:44]
+                
+                # Parse WAV header
+                channels, samplerate, dtype = self._parse_wav_header(header)
+                logger.info(f"🔊 Streaming: {samplerate}Hz, {channels}ch, {dtype}")
+                
+                # Open sounddevice output stream
+                with sd.RawOutputStream(
+                    samplerate=samplerate,
+                    channels=channels,
+                    dtype=dtype,
+                    blocksize=2048,
+                    latency='low'
+                ) as stream:
+                    # Play leftover data from header
+                    if leftover:
+                        stream.write(leftover)
                     
-                    for chunk in response.iter_content(chunk_size=8192):
+                    # Stream remaining audio chunks in real-time
+                    for chunk in iterator:
                         if self.stop_playback:
                             break
-                            
                         if chunk:
-                            chunk_count += 1
-                            
-                            # For first chunk, include WAV header
-                            if first_chunk:
-                                audio_buffer.write(chunk)
-                                first_chunk = False
-                                
-                                # Start playing after getting first chunk
-                                if chunk_count == 1 and len(chunk) > 44:  # WAV header is 44 bytes
-                                    audio_buffer.seek(0)
-                                    try:
-                                        sound = pygame.mixer.Sound(audio_buffer)
-                                        sound.play()
-                                        logger.info(f"🔊 Started playback (streaming)")
-                                    except:
-                                        pass  # Continue accumulating
-                            else:
-                                # Append subsequent chunks (without WAV headers)
-                                audio_buffer.write(chunk)
-                    
-                    # If we couldn't start streaming playback, play the complete audio
-                    if chunk_count > 0 and not pygame.mixer.get_busy():
-                        audio_buffer.seek(0)
-                        sound = pygame.mixer.Sound(audio_buffer)
-                        sound.play()
-                        logger.info(f"🔊 Playing complete audio ({chunk_count} chunks)")
-                    
-                    # Wait for playback to finish
-                    while pygame.mixer.get_busy() and not self.stop_playback:
-                        pygame.time.wait(100)
-                else:
-                    logger.error(f"Streaming TTS failed: {response.status_code}")
-                    # Fallback to non-streaming
-                    self._play_audio_standard(text)
-                    
-            except requests.exceptions.ChunkedEncodingError:
-                # This can happen with streaming, try to play what we have
-                if audio_buffer.tell() > 44:
-                    audio_buffer.seek(0)
-                    sound = pygame.mixer.Sound(audio_buffer)
-                    sound.play()
-                    while pygame.mixer.get_busy() and not self.stop_playback:
-                        pygame.time.wait(100)
+                            stream.write(chunk)
+                
             except Exception as e:
-                logger.error(f"Streaming playback error: {e}")
-                # Fallback to non-streaming
-                self._play_audio_standard(text)
+                logger.error(f"Streaming error: {e}")
             finally:
                 self.is_playing = False
         
-        # Play audio in background thread
+        # Start streaming in background thread
         audio_thread = threading.Thread(target=_stream_audio)
         audio_thread.daemon = True
         audio_thread.start()
     
-    def _play_audio_standard(self, text: str) -> None:
-        """Fallback to standard non-streaming TTS"""
-        try:
-            response = requests.post(
-                f"{self.tts_host}/tts",
-                json={
-                    "text": text,
-                    "exaggeration": 0.3,
-                    "cfg_weight": 0.5,
-                    "use_jarvis_voice": True,
-                    "stream": False
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                audio_data = io.BytesIO(response.content)
-                sound = pygame.mixer.Sound(audio_data)
-                sound.play()
-                
-                while pygame.mixer.get_busy() and not self.stop_playback:
-                    pygame.time.wait(100)
-            else:
-                logger.error(f"Standard TTS failed: {response.status_code}")
-        except Exception as e:
-            logger.error(f"Standard TTS error: {e}")
-    
-    def speak(self, text: str) -> None:
-        """Generate and play JARVIS speech (auto-selects streaming if available)"""
-        if not text:
-            return
-            
-        if self.enable_streaming and self.streaming_available:
-            self.speak_streaming(text)
-        else:
-            # Use standard TTS
-            def _play():
-                self.is_playing = True
-                self._play_audio_standard(text)
-                self.is_playing = False
-            
-            audio_thread = threading.Thread(target=_play)
-            audio_thread.daemon = True
-            audio_thread.start()
-    
     def stop(self):
         """Stop current playback"""
         self.stop_playback = True
-        pygame.mixer.stop()
     
     def wait_for_speech(self):
         """Wait for current speech to finish"""
         while self.is_playing:
-            pygame.time.wait(100)
+            time.sleep(0.1)
 
-# standard TTS class from chatterbox
-class JARVISTTS:
-    """Handle text-to-speech for JARVIS"""
-    
-    def __init__(self, tts_host: str):
-        self.tts_host = tts_host
-        self.is_playing = False
-        
-    def speak(self, text: str) -> None:
-        """Generate and play JARVIS speech"""
-        if not ENABLE_TTS:
-            return
-            
-        def _play_audio():
-            try:
-                self.is_playing = True
-                
-                # Request TTS
-                response = requests.post(
-                    f"{self.tts_host}/tts",
-                    json={
-                        "text": text,
-                        "exaggeration": 0.3,  # More measured for JARVIS
-                        "cfg_weight": 0.5,    # Balanced pacing
-                        "use_glados_voice": False  # Use default or JARVIS voice if available
-                    },
-                    timeout=30
-                )
-                
-                if response.status_code == 200:
-                    # Load audio from response
-                    audio_data = io.BytesIO(response.content)
-                    sound = pygame.mixer.Sound(audio_data)
-                    
-                    # Play and wait for completion
-                    sound.play()
-                    while pygame.mixer.get_busy():
-                        pygame.time.wait(100)
-                else:
-                    logger.error(f"TTS request failed: {response.status_code}")
-                    
-            except Exception as e:
-                logger.error(f"TTS playback error: {e}")
-            finally:
-                self.is_playing = False
-        
-        # Play audio in background thread to not block
-        audio_thread = threading.Thread(target=_play_audio)
-        audio_thread.daemon = True
-        audio_thread.start()
-    
-    def wait_for_speech(self):
-        """Wait for current speech to finish"""
-        while self.is_playing:
-            pygame.time.wait(100)
 
-# Example usage and testing
+# Standalone streaming function for testing
+def play_streaming_tts(tts_host: str, text: str):
+    """Simple function to play streaming TTS"""
+    response = requests.post(
+        f"{tts_host}/tts/stream",
+        json={
+            "text": text,
+            "exaggeration": 0.3,
+            "cfg_weight": 0.5,
+            "use_jarvis_voice": True,
+            "stream": True,
+            "chunk_size": 25
+        },
+        stream=True,
+        timeout=30
+    )
+    
+    response.raise_for_status()
+    it = response.iter_content(chunk_size=16384)
+    
+    # Read WAV header (first 44 bytes)
+    header = b""
+    while len(header) < 44:
+        header += next(it)
+    
+    header, leftover = header[:44], header[44:]
+    
+    # Parse header
+    ch = struct.unpack_from("<H", header, 22)[0]
+    sr = struct.unpack_from("<I", header, 24)[0]
+    bps = struct.unpack_from("<H", header, 34)[0]
+    dtype = {8: "int8", 16: "int16", 24: "int24", 32: "int32"}.get(bps, "int16")
+    
+    print(f"Audio: {ch}ch, {sr}Hz, {dtype}")
+    
+    # Open output stream and play
+    with sd.RawOutputStream(samplerate=sr, channels=ch, dtype=dtype) as out:
+        if leftover:
+            out.write(leftover)
+        for chunk in it:
+            if chunk:
+                out.write(chunk)
+
+
 if __name__ == "__main__":
-    pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
+    # Test the streaming TTS
+    tts_host = "http://10.0.0.108:8001"
     
-    # Test with your TTS server
-    tts = JARVISStreamingTTS("http://10.0.0.108:8001")
+    print("Testing JARVIS Streaming TTS...")
+    print("-" * 40)
     
-    # Test streaming
-    print("Testing streaming TTS...")
-    tts.speak("Good evening, Sir. All systems are now online. The streaming synthesis should provide lower latency.")
+    tts = JARVISStreamingTTS(tts_host)
+    
+    test_text = "Good evening, Sir. This streaming synthesis provides minimal latency. You should hear my voice almost immediately."
+    
+    print(f"Speaking: {test_text}")
+    tts.speak(test_text)
     tts.wait_for_speech()
     
-    print("Done!")
+    print("\nDone!")
