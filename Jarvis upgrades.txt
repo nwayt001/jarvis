@@ -1,0 +1,3 @@
+- Make the text to speech faster.
+- Increase the amount of tools that Jarvis has.
+- Think of more use cases for the Jarvis agent.
