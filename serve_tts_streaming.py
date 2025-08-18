@@ -113,8 +113,24 @@ async def generate_audio_stream(text: str, request: TTSRequest) -> AsyncGenerato
                 "chunk_size": request.chunk_size
             }
             
+            # Try without voice cloning first to avoid reference audio issues
             if request.use_jarvis_voice and os.path.exists(JARVIS_VOICE_PATH):
-                generator_params["audio_prompt_path"] = JARVIS_VOICE_PATH
+                # Test if the reference audio works
+                try:
+                    logger.info(f"Testing reference audio: {JARVIS_VOICE_PATH}")
+                    # Try a quick test generation
+                    test_gen = model.generate(
+                        "Test",
+                        audio_prompt_path=JARVIS_VOICE_PATH,
+                        exaggeration=request.exaggeration,
+                        cfg_weight=request.cfg_weight
+                    )
+                    # If it works, use it for streaming
+                    generator_params["audio_prompt_path"] = JARVIS_VOICE_PATH
+                    logger.info("Reference audio validated successfully")
+                except Exception as e:
+                    logger.warning(f"Reference audio validation failed: {e}")
+                    logger.info("Proceeding without voice cloning")
             
             for audio_chunk, metrics in model.generate_stream(**generator_params):
                 # Log first chunk latency
