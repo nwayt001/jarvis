@@ -3,6 +3,8 @@ import asyncio
 import requests
 from typing import TypedDict, Annotated, Sequence, List, Optional, Literal
 from jarvis_tts_fixed import JARVISStreamingTTS
+from jarvis_calendar import JARVISCalendar, get_calendar_summary, check_upcoming_meeting
+from jarvis_reminder import JARVISReminder
 from langchain_ollama import ChatOllama
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -83,7 +85,9 @@ OPERATIONAL PROTOCOLS:
 
 IMPORTANT: When the user asks about news, current events, or information you might not have, you MUST use the web_search tool. Don't make up information - search for it.
 
-IMPORTANT: Maintain professional butler-like composure while allowing personality to show through dry observations. Never panic or lose composure."""
+IMPORTANT: Maintain professional butler-like composure while allowing personality to show through dry observations. Never panic or lose composure.
+
+IMPORTANT: you're responses will be fed to a TTS system, so use clear, concise language that sounds natural when spoken. Avoid special characters or complex formatting that might not translate well to speech."""
 
 # Initialize pygame for audio playback
 pygame.mixer.init(frequency=22050, size=-16, channels=2, buffer=512)
@@ -521,8 +525,67 @@ def check_web_scraper_status() -> str:
     except Exception as e:
         return f"I encountered an error checking the scraper status: {str(e)}"
 
+@tool
+def get_calendar_events() -> str:
+    """Get today's calendar events and schedule."""
+    print(f"   📅 Checking calendar...")
+    try:
+        return get_calendar_summary()
+    except Exception as e:
+        return f"I'm unable to access your calendar at the moment, Sir. Error: {str(e)}"
+
+@tool
+def check_next_meeting() -> str:
+    """Check the next upcoming meeting or appointment."""
+    print(f"   ⏰ Checking next meeting...")
+    try:
+        cal = JARVISCalendar()
+        next_meeting = cal.get_next_meeting()
+        
+        if not next_meeting:
+            return "You have no upcoming meetings scheduled, Sir."
+        
+        return cal.format_event_for_speech(next_meeting)
+    except Exception as e:
+        return f"I'm unable to check your meetings at the moment, Sir. Error: {str(e)}"
+
+@tool
+def morning_briefing(location: str = "New York") -> str:
+    """Provide a comprehensive morning briefing with weather and calendar events."""
+    print(f"   ☀️ Preparing morning briefing...")
+    try:
+        briefing = []
+        
+        # Greeting
+        hour = datetime.now().hour
+        if hour < 12:
+            briefing.append("Good morning, Sir.")
+        elif hour < 17:
+            briefing.append("Good afternoon, Sir.")
+        else:
+            briefing.append("Good evening, Sir.")
+        
+        # Weather
+        weather_info = get_weather(location)
+        if "error" not in weather_info.lower():
+            briefing.append(f"\nWeather Update:\n{weather_info}")
+        
+        # Calendar
+        calendar_info = get_calendar_summary()
+        briefing.append(f"\nCalendar:\n{calendar_info}")
+        
+        # Check for imminent meetings
+        reminder = check_upcoming_meeting(15)  # Check for meetings in next 15 minutes
+        if reminder:
+            briefing.append(f"\n⚠️ Urgent: {reminder}")
+        
+        return "\n".join(briefing)
+    except Exception as e:
+        return f"I apologise, Sir, but I encountered an error preparing your briefing: {str(e)}"
+
 # Collect all tools
-tools = [web_search, get_weather, execute_bash, read_file, write_file, list_directory, check_web_scraper_status]
+tools = [web_search, get_weather, execute_bash, read_file, write_file, list_directory, 
+         check_web_scraper_status, get_calendar_events, check_next_meeting, morning_briefing]
 
 # Define the state for our graph
 class AgentState(TypedDict):
@@ -703,6 +766,15 @@ async def main():
     # Initialize TTS
     tts = JARVISStreamingTTS(TTS_HOST) if ENABLE_TTS else None
     
+    # Initialize reminder service
+    reminder_service = None
+    try:
+        reminder_service = JARVISReminder(TTS_HOST)
+        reminder_service.start()
+        print("📅 Meeting reminder service activated")
+    except Exception as e:
+        print(f"⚠️  Could not start reminder service: {e}")
+    
     print("\n" + "=" * 60)
     
     # Opening speech
@@ -730,6 +802,8 @@ async def main():
             if tts:
                 tts.speak(farewell)
                 tts.wait_for_speech()
+            if reminder_service:
+                reminder_service.stop()
             break
             
         if not user_input:

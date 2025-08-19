@@ -1,3 +1,41 @@
 - Make the text to speech faster.
 - Increase the amount of tools that Jarvis has.
 - Think of more use cases for the Jarvis agent.
+
+Jarvis task idea
+
+Daily Productivity
+
+  - Morning briefing - "JARVIS, give me my morning update" (weather, calendar, news headlines, stock
+   prices)
+  - Smart reminders - Set context-aware reminders that trigger based on location/time/activity
+  - Email triage - Summarize unread emails and draft responses
+  - Meeting prep - Pull relevant docs/notes before meetings, generate talking points
+
+  Development Workflow
+
+  - Code review assistant - "JARVIS, review my latest commit and check for security issues"
+  - Dependency tracker - Monitor and alert about outdated packages or security vulnerabilities
+  - Server monitoring - Check system resources, running processes, disk space
+  - Git workflow - Auto-commit with smart messages, PR summaries, merge conflict resolution
+
+  Home Automation
+
+  - Smart home control - Integrate with HomeKit/Alexa/Google Home APIs
+  - Energy monitoring - Track power usage patterns and suggest optimizations
+  - Security system - Monitor network traffic, alert on unusual activity
+
+  Research & Learning
+
+  - Paper summarizer - Fetch and summarize academic papers or documentation
+  - Learning assistant - Create flashcards, quiz you on topics, track progress
+  - Project researcher - Gather info on new technologies/frameworks before starting projects
+
+  Cool Advanced Features
+
+  - Voice-controlled coding - "JARVIS, refactor this function to use async/await"
+  - Ambient awareness - Use system events (low battery, high CPU) to proactively help
+  - Multi-modal input - Process screenshots/images you share ("What's wrong with this UI?")
+  - Conversation memory - Remember context across sessions using a vector database
+
+  Which of these sound most useful to you? I can help implement any of them.

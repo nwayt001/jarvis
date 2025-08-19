@@ -140,22 +140,27 @@ class JARVISStreamingTTS:
                     samplerate=samplerate,
                     channels=channels,
                     dtype=dtype,
-                    blocksize=2048,  # Fixed blocksize for consistency
-                    latency='high'    # Higher latency for more stable playback
+                    blocksize=0,  # Let sounddevice choose
+                    latency=0.06  # Less aggressive for smoother startup
                 ) as stream:
                     
-                    # Simplified crossfade setup - no prebuffer!
-                    FADEIN_MS = 10     # Fade-in for first chunk only
+                    # Prebuffer and crossfade setup
+                    PREBUFFER_MS = 80  # Increased prebuffer to ensure smooth start
+                    FADEIN_MS = 10     # Slightly longer fade-in for smoother transition
+                    
+                    bytes_per_frame = channels * (bps // 8)
+                    prebuffer_frames = int(samplerate * PREBUFFER_MS / 1000.0)
+                    prebuffer_bytes = prebuffer_frames * bytes_per_frame
                     
                     overlap = max(1, int(samplerate * overlap_ms / 1000.0))  # frames
                     fade_in = np.linspace(0.0, 1.0, overlap, dtype=np.float32)[:, None]
                     fade_out = 1.0 - fade_in
                     prev_tail = None
-                    first_chunk = True
+                    first_chunk_processed = False
                     
                     def process_and_write(pcm_bytes):
                         """Process chunk with crossfading"""
-                        nonlocal prev_tail, first_chunk
+                        nonlocal prev_tail, first_chunk_processed
                         
                         if not pcm_bytes:
                             return
@@ -170,31 +175,37 @@ class JARVISStreamingTTS:
                         else:
                             f = frames.astype(np.float32)
                         
-                        # First chunk - apply fade-in but DON'T hold back overlap
-                        if first_chunk:
-                            first_chunk = False
+                        # First chunk - special handling with prebuffer and fade-in
+                        if not first_chunk_processed:
+                            first_chunk_processed = True
                             
                             # Apply fade-in to the very beginning
                             fadein_frames = int(samplerate * FADEIN_MS / 1000.0)
                             if fadein_frames > 0 and len(f) >= fadein_frames:
-                                # Use a smoother S-curve
+                                # Use a smoother S-curve instead of linear ramp
                                 t = np.linspace(0.0, 1.0, fadein_frames, dtype=np.float32)
+                                # Smooth S-curve: 3t^2 - 2t^3
                                 ramp = (3 * t**2 - 2 * t**3)[:, None]
                                 f[:fadein_frames] *= ramp
                             
-                            # For the FIRST chunk, play it ALL immediately
-                            # Don't hold back overlap since there's nothing to blend with
-                            if dtype == 'float32':
-                                write_data = np.clip(f, -1, 1)
+                            # Now do the normal "hold back last overlap" logic
+                            if len(f) <= overlap:
+                                prev_tail = f.copy()
+                                # don't write yet; wait for next chunk
+                                return
                             else:
-                                max_positive = float(2**(int(bps)-1) - 1)
-                                write_data = np.clip(f, -1, 1) * max_positive
-                            
-                            stream.write(self._frames_to_bytes(write_data, dtype))
-                            
-                            # Save the tail for next chunk's crossfade
-                            prev_tail = f[-overlap:].copy()
-                            return
+                                body = f[:-overlap]
+                                prev_tail = f[-overlap:].copy()
+                                
+                                # Write the body to the device
+                                if dtype == 'float32':
+                                    write_data = np.clip(body, -1, 1)
+                                else:
+                                    max_positive = float(2**(int(bps)-1) - 1)
+                                    write_data = np.clip(body, -1, 1) * max_positive
+                                
+                                stream.write(self._frames_to_bytes(write_data, dtype))
+                                return
                         
                         # Subsequent chunks - crossfade with previous tail
                         if len(f) < overlap:
@@ -227,11 +238,37 @@ class JARVISStreamingTTS:
                         
                         stream.write(self._frames_to_bytes(write_frames, dtype))
                     
-                    # Process leftover from header immediately if any
-                    if leftover:
-                        process_and_write(leftover)
+                    # Prebuffer the first chunk to prevent startup underflow
+                    buffer = leftover  # PCM that came with the header
                     
-                    # Process streaming chunks as they arrive - no prebuffering!
+                    # Accumulate enough data before first write
+                    while len(buffer) < prebuffer_bytes:
+                        try:
+                            chunk = next(iterator)
+                            if chunk:
+                                buffer += chunk
+                            else:
+                                break
+                        except StopIteration:
+                            break
+                    
+                    # Process ONLY the prebuffer amount, save the rest for smooth transition
+                    if len(buffer) > prebuffer_bytes:
+                        # Split at prebuffer boundary
+                        first_data = buffer[:prebuffer_bytes]
+                        remaining = buffer[prebuffer_bytes:]
+                        
+                        # Process the exact prebuffer amount
+                        process_and_write(first_data)
+                        
+                        # Process the remaining data as a normal chunk
+                        if remaining:
+                            process_and_write(remaining)
+                    elif buffer:
+                        # Process all if we have less than prebuffer
+                        process_and_write(buffer)
+                    
+                    # Process remaining streaming chunks
                     for chunk in iterator:
                         if self.stop_playback:
                             break
