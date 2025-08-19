@@ -34,7 +34,7 @@ class TTSRequest(BaseModel):
     exaggeration: float = 0.0  # JARVIS measured style
     cfg_weight: float = 0.6    # Deliberate pacing
     use_jarvis_voice: bool = True
-    chunk_size: int = 25       # Smaller chunks for lower latency
+    chunk_size: int = 75       # Larger chunks for better performance
     stream: bool = True        # Enable streaming by default
 
 @app.on_event("startup")
@@ -130,10 +130,20 @@ async def generate_audio_stream(text: str, request: TTSRequest) -> AsyncGenerato
                     logger.info(f"First chunk latency: {metrics.latency_to_first_chunk:.3f}s")
                     first_chunk = False
                 
-                # Add tiny padding to reduce boundary artifacts (but not for first chunk)
-                if chunk_count > 1:
-                    pad = torch.zeros(1, int(model.sr * 0.002), dtype=audio_chunk.dtype, device=audio_chunk.device)
-                    audio_chunk = torch.cat([audio_chunk, pad], dim=1)
+                # Special processing for first chunk
+                if chunk_count == 1:
+                    # Apply fade-in to first 8ms to eliminate DC step
+                    fadein_samples = int(model.sr * 0.008)  # 8ms fade-in
+                    if audio_chunk.shape[1] > fadein_samples:
+                        ramp = torch.linspace(0, 1, fadein_samples, device=audio_chunk.device).unsqueeze(0)
+                        audio_chunk[:, :fadein_samples] *= ramp
+                    
+                    # Optional: prepend 3ms of silence to give client time to spin up
+                    silence_pad = torch.zeros(1, int(model.sr * 0.003), dtype=audio_chunk.dtype, device=audio_chunk.device)
+                    audio_chunk = torch.cat([silence_pad, audio_chunk], dim=1)
+                
+                # Skip padding for subsequent chunks to reduce latency
+                # (removed the 2ms padding that was adding unnecessary latency)
                 
                 # Convert to consistent float32 format
                 pcm = audio_chunk.squeeze(0).detach().cpu().to(torch.float32).clamp(-1, 1)

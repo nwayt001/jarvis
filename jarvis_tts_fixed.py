@@ -105,7 +105,8 @@ class JARVISStreamingTTS:
                     return
                 
                 response.raise_for_status()
-                iterator = response.iter_content(chunk_size=16384)
+                # Larger network buffer for better first chunk
+                iterator = response.iter_content(chunk_size=65536)  # 64KB for fatter first chunk
                 
                 # Read WAV header (first 44 bytes)
                 header = b""
@@ -134,18 +135,26 @@ class JARVISStreamingTTS:
                     channels=channels,
                     dtype=dtype,
                     blocksize=0,  # Let sounddevice choose
-                    latency='low'
+                    latency='interactive'  # Less aggressive for smoother startup
                 ) as stream:
                     
-                    # Crossfade setup
+                    # Prebuffer and crossfade setup
+                    PREBUFFER_MS = 60  # Prebuffer before first write
+                    FADEIN_MS = 8      # Smooth fade-in for first frames
+                    
+                    bytes_per_frame = channels * (bps // 8)
+                    prebuffer_frames = int(samplerate * PREBUFFER_MS / 1000.0)
+                    prebuffer_bytes = prebuffer_frames * bytes_per_frame
+                    
                     overlap = max(1, int(samplerate * overlap_ms / 1000.0))  # frames
                     fade_in = np.linspace(0.0, 1.0, overlap, dtype=np.float32)[:, None]
                     fade_out = 1.0 - fade_in
                     prev_tail = None
+                    first_chunk_processed = False
                     
                     def process_and_write(pcm_bytes):
                         """Process chunk with crossfading"""
-                        nonlocal prev_tail
+                        nonlocal prev_tail, first_chunk_processed
                         
                         if not pcm_bytes:
                             return
@@ -160,34 +169,33 @@ class JARVISStreamingTTS:
                         else:
                             f = frames.astype(np.float32)
                         
-                        # First chunk - no previous tail
-                        if prev_tail is None:
+                        # First chunk - special handling with prebuffer and fade-in
+                        if not first_chunk_processed:
+                            first_chunk_processed = True
+                            
+                            # Apply fade-in to the very beginning (5-10ms)
+                            fadein_frames = int(samplerate * FADEIN_MS / 1000.0)
+                            if fadein_frames > 0 and len(f) >= fadein_frames:
+                                ramp = np.linspace(0.0, 1.0, fadein_frames, dtype=np.float32)[:, None]
+                                f[:fadein_frames] *= ramp
+                            
+                            # Now do the normal "hold back last overlap" logic
                             if len(f) <= overlap:
-                                # Very short first chunk - just save it
                                 prev_tail = f.copy()
+                                # don't write yet; wait for next chunk
                                 return
-                            
-                            # For first chunk, play everything INCLUDING overlap
-                            # (no need to hold back since there's nothing to blend with yet)
-                            # This fixes the pause after first chunk
-                            
-                            # Apply a short fade-in to avoid initial click
-                            fade_in_len = min(overlap // 2, len(f))
-                            if fade_in_len > 0:
-                                fade = np.linspace(0.0, 1.0, fade_in_len, dtype=np.float32)[:, None]
-                                f[:fade_in_len] *= fade
-                            
-                            # Save tail for next chunk
-                            prev_tail = f[-overlap:].copy()
-                            
-                            # Play the entire first chunk
-                            if dtype == 'float32':
-                                write_data = np.clip(f, -1, 1)
                             else:
-                                write_data = np.clip(f, -1, 1) * (2**(8*int(bps/8)-1)-1)
-                            
-                            stream.write(self._frames_to_bytes(write_data, dtype))
-                            return
+                                body = f[:-overlap]
+                                prev_tail = f[-overlap:].copy()
+                                
+                                # Write the body to the device
+                                if dtype == 'float32':
+                                    write_data = np.clip(body, -1, 1)
+                                else:
+                                    write_data = np.clip(body, -1, 1) * (2**(8*int(bps/8)-1)-1)
+                                
+                                stream.write(self._frames_to_bytes(write_data, dtype))
+                                return
                         
                         # Subsequent chunks - crossfade with previous tail
                         if len(f) < overlap:
@@ -219,11 +227,25 @@ class JARVISStreamingTTS:
                         
                         stream.write(self._frames_to_bytes(write_frames, dtype))
                     
-                    # Process leftover from header
-                    if leftover:
-                        process_and_write(leftover)
+                    # Prebuffer the first chunk to prevent startup underflow
+                    buffer = leftover  # PCM that came with the header
                     
-                    # Process streaming chunks
+                    # Accumulate enough data before first write (60ms)
+                    while len(buffer) < prebuffer_bytes:
+                        try:
+                            chunk = next(iterator)
+                            if chunk:
+                                buffer += chunk
+                            else:
+                                break
+                        except StopIteration:
+                            break
+                    
+                    # Process the prebuffered data
+                    if buffer:
+                        process_and_write(buffer)
+                    
+                    # Process remaining streaming chunks
                     for chunk in iterator:
                         if self.stop_playback:
                             break
