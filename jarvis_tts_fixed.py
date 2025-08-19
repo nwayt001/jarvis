@@ -145,10 +145,10 @@ class JARVISStreamingTTS:
                 ) as stream:
                     
                     # Prebuffer and crossfade setup
-                    PREBUFFER_MS = 60  # Prebuffer before first write
-                    FADEIN_MS = 8      # Smooth fade-in for first frames
+                    PREBUFFER_MS = 80  # Increased prebuffer to ensure smooth start
+                    FADEIN_MS = 10     # Slightly longer fade-in for smoother transition
                     
-                    bytes_per_frame = channels * (int(bps) // 8)
+                    bytes_per_frame = channels * (bps // 8)
                     prebuffer_frames = int(samplerate * PREBUFFER_MS / 1000.0)
                     prebuffer_bytes = prebuffer_frames * bytes_per_frame
                     
@@ -179,10 +179,13 @@ class JARVISStreamingTTS:
                         if not first_chunk_processed:
                             first_chunk_processed = True
                             
-                            # Apply fade-in to the very beginning (5-10ms)
+                            # Apply fade-in to the very beginning
                             fadein_frames = int(samplerate * FADEIN_MS / 1000.0)
                             if fadein_frames > 0 and len(f) >= fadein_frames:
-                                ramp = np.linspace(0.0, 1.0, fadein_frames, dtype=np.float32)[:, None]
+                                # Use a smoother S-curve instead of linear ramp
+                                t = np.linspace(0.0, 1.0, fadein_frames, dtype=np.float32)
+                                # Smooth S-curve: 3t^2 - 2t^3
+                                ramp = (3 * t**2 - 2 * t**3)[:, None]
                                 f[:fadein_frames] *= ramp
                             
                             # Now do the normal "hold back last overlap" logic
@@ -238,7 +241,7 @@ class JARVISStreamingTTS:
                     # Prebuffer the first chunk to prevent startup underflow
                     buffer = leftover  # PCM that came with the header
                     
-                    # Accumulate enough data before first write (60ms)
+                    # Accumulate enough data before first write
                     while len(buffer) < prebuffer_bytes:
                         try:
                             chunk = next(iterator)
@@ -249,8 +252,20 @@ class JARVISStreamingTTS:
                         except StopIteration:
                             break
                     
-                    # Process the prebuffered data
-                    if buffer:
+                    # Process ONLY the prebuffer amount, save the rest for smooth transition
+                    if len(buffer) > prebuffer_bytes:
+                        # Split at prebuffer boundary
+                        first_data = buffer[:prebuffer_bytes]
+                        remaining = buffer[prebuffer_bytes:]
+                        
+                        # Process the exact prebuffer amount
+                        process_and_write(first_data)
+                        
+                        # Process the remaining data as a normal chunk
+                        if remaining:
+                            process_and_write(remaining)
+                    elif buffer:
+                        # Process all if we have less than prebuffer
                         process_and_write(buffer)
                     
                     # Process remaining streaming chunks

@@ -34,7 +34,7 @@ class TTSRequest(BaseModel):
     exaggeration: float = 0.0  # JARVIS measured style
     cfg_weight: float = 0.6    # Deliberate pacing
     use_jarvis_voice: bool = True
-    chunk_size: int = 75       # Larger chunks for better performance
+    chunk_size: int = 100      # Consistent larger chunks to avoid mid-word splits
     stream: bool = True        # Enable streaming by default
 
 @app.on_event("startup")
@@ -132,14 +132,16 @@ async def generate_audio_stream(text: str, request: TTSRequest) -> AsyncGenerato
                 
                 # Special processing for first chunk
                 if chunk_count == 1:
-                    # Apply fade-in to first 8ms to eliminate DC step
-                    fadein_samples = int(model.sr * 0.008)  # 8ms fade-in
+                    # Apply fade-in to first 10ms to eliminate DC step
+                    fadein_samples = int(model.sr * 0.010)  # 10ms fade-in
                     if audio_chunk.shape[1] > fadein_samples:
-                        ramp = torch.linspace(0, 1, fadein_samples, device=audio_chunk.device).unsqueeze(0)
+                        # Use smooth S-curve for fade-in
+                        t = torch.linspace(0, 1, fadein_samples, device=audio_chunk.device)
+                        ramp = (3 * t**2 - 2 * t**3).unsqueeze(0)
                         audio_chunk[:, :fadein_samples] *= ramp
                     
-                    # Optional: prepend 3ms of silence to give client time to spin up
-                    silence_pad = torch.zeros(1, int(model.sr * 0.003), dtype=audio_chunk.dtype, device=audio_chunk.device)
+                    # Prepend 5ms of silence to give client time to fully initialize
+                    silence_pad = torch.zeros(1, int(model.sr * 0.005), dtype=audio_chunk.dtype, device=audio_chunk.device)
                     audio_chunk = torch.cat([silence_pad, audio_chunk], dim=1)
                 
                 # Skip padding for subsequent chunks to reduce latency
