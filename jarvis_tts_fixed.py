@@ -127,6 +127,12 @@ class JARVISStreamingTTS:
                 # Parse WAV header
                 fmt, channels, samplerate, bps, dtype = self.parse_wav_header(header)
                 
+                # Guard against unsupported dtypes (sounddevice doesn't support int24)
+                allowed_dtypes = {'float32', 'int32', 'int16', 'int8', 'uint8'}
+                if dtype not in allowed_dtypes:
+                    logger.warning(f"Unsupported dtype '{dtype}', falling back to float32")
+                    dtype = 'float32'
+                
                 # Open sounddevice output stream
                 logger.info(f"🔊 Starting playback: {samplerate}Hz, {channels}ch, {dtype}")
                 
@@ -135,14 +141,14 @@ class JARVISStreamingTTS:
                     channels=channels,
                     dtype=dtype,
                     blocksize=0,  # Let sounddevice choose
-                    latency='interactive'  # Less aggressive for smoother startup
+                    latency=0.06  # Less aggressive for smoother startup
                 ) as stream:
                     
                     # Prebuffer and crossfade setup
                     PREBUFFER_MS = 60  # Prebuffer before first write
                     FADEIN_MS = 8      # Smooth fade-in for first frames
                     
-                    bytes_per_frame = channels * (bps // 8)
+                    bytes_per_frame = channels * (int(bps) // 8)
                     prebuffer_frames = int(samplerate * PREBUFFER_MS / 1000.0)
                     prebuffer_bytes = prebuffer_frames * bytes_per_frame
                     
@@ -164,8 +170,8 @@ class JARVISStreamingTTS:
                         # Convert to float32 for processing
                         if dtype.startswith('int'):
                             # Scale integer PCM to [-1, 1]
-                            scale = np.float32(1.0 / (2**(8*int(bps/8)-1)))
-                            f = frames.astype(np.float32) * scale
+                            max_value = float(2**(int(bps)-1))
+                            f = frames.astype(np.float32) / max_value
                         else:
                             f = frames.astype(np.float32)
                         
@@ -192,7 +198,8 @@ class JARVISStreamingTTS:
                                 if dtype == 'float32':
                                     write_data = np.clip(body, -1, 1)
                                 else:
-                                    write_data = np.clip(body, -1, 1) * (2**(8*int(bps/8)-1)-1)
+                                    max_positive = float(2**(int(bps)-1) - 1)
+                                    write_data = np.clip(body, -1, 1) * max_positive
                                 
                                 stream.write(self._frames_to_bytes(write_data, dtype))
                                 return
@@ -223,7 +230,8 @@ class JARVISStreamingTTS:
                         if dtype == 'float32':
                             write_frames = np.clip(out_frames, -1, 1)
                         else:
-                            write_frames = np.clip(out_frames, -1, 1) * (2**(8*int(bps/8)-1)-1)
+                            max_positive = float(2**(int(bps)-1) - 1)
+                            write_frames = np.clip(out_frames, -1, 1) * max_positive
                         
                         stream.write(self._frames_to_bytes(write_frames, dtype))
                     
@@ -261,7 +269,8 @@ class JARVISStreamingTTS:
                         if dtype == 'float32':
                             write_frames = faded
                         else:
-                            write_frames = np.clip(faded, -1, 1) * (2**(8*int(bps/8)-1)-1)
+                            max_positive = float(2**(int(bps)-1) - 1)
+                            write_frames = np.clip(faded, -1, 1) * max_positive
                         
                         stream.write(self._frames_to_bytes(write_frames, dtype))
                 
