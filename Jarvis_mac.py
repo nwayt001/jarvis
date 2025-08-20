@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 # Configuration for local Mac setup
 LLAMA_CPP_HOST = "http://localhost:8080"  # Default llama-server port
 MODEL_PATH = "/path/to/gpt-oss-20b-mxfp4.gguf"  # Update with your actual model path
-ENABLE_TTS = False  # Disable TTS for now, can be re-enabled with local TTS
+TTS_HOST = "http://127.0.0.1:8001"      # Local Mac TTS server (faster!)
+ENABLE_TTS = True  # Enable TTS with local Mac server
 WEATHER_API_KEY = ""  # Add your OpenWeatherMap API key if you have one
 
 # JARVIS System Prompt
@@ -818,14 +819,15 @@ async def main():
             llama_process.terminate()
         return
     
-    # Initialize TTS if desired (would need local TTS solution)
+    # Initialize TTS
     tts = None
     if ENABLE_TTS:
         try:
-            # You could initialize a local TTS here if available
-            pass
-        except:
-            print("⚠️  TTS not available")
+            tts = JARVISStreamingTTS(TTS_HOST)
+            print("🔊 TTS system initialized")
+        except Exception as e:
+            print(f"⚠️  TTS not available: {e}")
+            tts = None
     
     # Initialize reminder service
     reminder_service = None
@@ -841,6 +843,8 @@ async def main():
     # Opening speech
     opening = "Good evening, Sir. All systems are now online. How may I assist you today?"
     print(f"JARVIS: {opening}")
+    if tts:
+        tts.speak(opening)
     
     print("\nType 'exit' when you wish to end our session.\n")
     
@@ -849,17 +853,26 @@ async def main():
     
     try:
         while True:
+            # Wait for any ongoing speech to finish before accepting input
+            if tts:
+                tts.wait_for_speech()
+            
             # Get user input
             user_input = input("You: ").strip()
             
             if user_input.lower() in ['exit', 'quit', 'bye', 'goodbye']:
                 farewell = "Very well, Sir. I'll be here if you need me. Have a pleasant evening."
                 print(f"\nJARVIS: {farewell}")
+                if tts:
+                    tts.speak(farewell)
+                    tts.wait_for_speech()
                 break
                 
             if not user_input:
                 empty_response = "I'm listening, Sir. Please feel free to share your request."
                 print(f"JARVIS: {empty_response}\n")
+                if tts:
+                    tts.speak(empty_response)
                 continue
                 
             # Add user message to state
@@ -888,12 +901,18 @@ async def main():
                 if ai_response:
                     # Print response
                     print(f"\nJARVIS: {ai_response}\n")
+                    
+                    # Speak response
+                    if tts:
+                        tts.speak(ai_response)
                 else:
                     # Try to get any AI message content as fallback
                     for msg in reversed(result["messages"]):
                         if isinstance(msg, AIMessage) and msg.content:
                             ai_response = msg.content
                             print(f"\nJARVIS: {ai_response}\n")
+                            if tts:
+                                tts.speak(ai_response)
                             break
                     else:
                         logger.warning("⚠️ No AI response message found in result")
@@ -901,6 +920,8 @@ async def main():
             except Exception as e:
                 error_response = f"I apologise, Sir, but I've encountered an unexpected error: {str(e)}. Shall I attempt to diagnose the issue?"
                 print(f"\nJARVIS: {error_response}\n")
+                if tts:
+                    tts.speak(error_response)
     
     finally:
         # Cleanup

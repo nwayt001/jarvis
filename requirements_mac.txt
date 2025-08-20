@@ -9,3 +9,9 @@ google-auth-httplib2
 google-api-python-client
 requests
 llama-cpp-python
+chatterbox-tts
+sounddevice
+fastapi
+uvicorn
+torch
+torchaudio

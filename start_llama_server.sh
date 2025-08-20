@@ -27,7 +27,7 @@ echo ""
 # Start llama-server with the specified configuration
 llama-server \
     --model "$MODEL_PATH" \
-    -c 0 \
+    -c 8096 \
     -fa \
     --jinja \
     --reasoning-format none \
