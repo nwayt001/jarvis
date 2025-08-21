@@ -6,6 +6,7 @@ from jarvis_tts_fixed import JARVISStreamingTTS
 from jarvis_calendar import JARVISCalendar, get_calendar_summary, check_upcoming_meeting
 from jarvis_reminder import JARVISReminder
 from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI 
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.tools import tool
@@ -29,9 +30,10 @@ logging.basicConfig(level=logging.WARNING)  # Changed to WARNING to reduce noise
 logger = logging.getLogger(__name__)
 
 # Configuration
-OLLAMA_HOST = "http://10.0.0.108:11434"  # Replace with your Linux machine's IP
+LLAMA_CPP_HOST = "http://localhost:8080" # Will either be a local or remote Llama.cpp server
 TTS_HOST = "http://10.0.0.108:8001"     # Chatterbox TTS server
 MODEL_NAME = "gpt-oss:20b"  # Or whatever model you have in Ollama
+MODEL_PATH = "../../local-llm-models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf"
 ENABLE_TTS = True  # Toggle TTS on/off
 WEATHER_API_KEY = ""  # Add your OpenWeatherMap API key if you have one
 
@@ -591,26 +593,91 @@ tools = [web_search, get_weather, execute_bash, read_file, write_file, list_dire
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
 
+def start_llama_server():
+    """Start llama-server with the specified configuration"""
+    print("🚀 Starting local LLM server...")
+    
+    # Get the actual model path from user input or environment variable
+    model_path = MODEL_PATH
+    
+    if not Path(model_path).exists():
+        print(f"❌ Model file not found at: {model_path}")
+        print("Please update MODEL_PATH in the script or set LLAMA_MODEL_PATH environment variable")
+        return None
+    
+    # Build the llama-server command
+    cmd = [
+        "llama-server",
+        "--model", model_path,
+        "-c", "0",  # Unlimited context
+        "-fa",  # Flash attention
+        "--jinja",  # Jinja templating
+        "--reasoning-format", "deepseek",
+        "-ngl", "99",  # GPU layers
+        "--host", "0.0.0.0",
+        "--port", "8080"
+    ]
+    
+    print(f"   Command: {' '.join(cmd)}")
+    
+    try:
+        # Start llama-server as a subprocess
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Wait a moment for the server to start
+        import time
+        time.sleep(5)
+        
+        # Check if server is running
+        try:
+            response = requests.get(f"{LLAMA_CPP_HOST}/health", timeout=5)
+            if response.status_code == 200:
+                print("✅ Local LLM server started successfully")
+                return process
+        except:
+            pass
+        
+        print("⚠️  Server may still be starting...")
+        return process
+        
+    except FileNotFoundError:
+        print("❌ llama-server not found. Please install llama.cpp")
+        print("   brew install llama.cpp  # For Mac with Homebrew")
+        return None
+    except Exception as e:
+        print(f"❌ Failed to start llama-server: {e}")
+        return None
 
 def test_connections():
     global ENABLE_TTS
     """Test connections to both Ollama and Chatterbox"""
     print("🔧 Initiating JARVIS systems diagnostic...")
     
-    # Test Ollama
-    print(f"\n📡 Testing neural network connection at: {OLLAMA_HOST}")
+   # Test llama-server
+    print(f"\n📡 Testing neural network connection at: {LLAMA_CPP_HOST}")
     try:
-        response = requests.get(f"{OLLAMA_HOST}/api/tags", timeout=5)
+        response = requests.get(f"{LLAMA_CPP_HOST}/health", timeout=5)
         if response.status_code == 200:
             print("✅ Neural network connection established")
-            models = response.json().get('models', [])
-            if models:
-                print(f"📦 Available models: {', '.join(m['name'] for m in models)}")
+            
+            # Get model info
+            models_response = requests.get(f"{LLAMA_CPP_HOST}/v1/models", timeout=5)
+            if models_response.status_code == 200:
+                models = models_response.json().get('data', [])
+                if models:
+                    print(f"📦 Loaded model: {models[0].get('id', 'unknown')}")
         else:
             print(f"❌ Connection responded with status {response.status_code}")
             return False
     except Exception as e:
         print(f"❌ Neural network connection failed: {e}")
+        print("\n💡 Tip: Make sure llama-server is running with:")
+        print(f"   llama-server --model {MODEL_PATH} -c 0 -fa --jinja --reasoning-format none -ngl 99")
         return False
     
     # Test Chatterbox TTS
@@ -654,19 +721,20 @@ def create_jarvis_prompt():
         ("human", "{input}"),
     ])
 
-# Initialize ChatOllama with remote host
+# Initialize ChatOpenAI to use llama-cpp's OpenAI-compatible endpoint
 def create_llm():
-    """Create LLM with JARVIS personality"""
-    llm = ChatOllama(
-        model=MODEL_NAME,
-        base_url=OLLAMA_HOST,
-        temperature=0.7,  # Balanced for JARVIS's measured responses
-        num_ctx= 8192,  # Adjust based on model capabilities
+    """Create LLM with JARVIS personality using OpenAI-compatible interface"""
+    llm = ChatOpenAI(
+        base_url=f"{LLAMA_CPP_HOST}/v1",
+        api_key="not-needed",  # llama-cpp doesn't need an API key
+        model="local-model",  # This can be any string
+        temperature=0.7,
     )
     
     # Bind tools and ensure they're properly registered
     llm_with_tools = llm.bind_tools(tools)
     return llm_with_tools
+
 
 # Define the agent node
 def agent_node(state: AgentState) -> dict:
@@ -758,6 +826,14 @@ async def main():
     print("🤖 JARVIS v1.0 - Just A Rather Very Intelligent System")
     print("=" * 60)
     
+    #start llama-server automatically
+    llama_process = None
+    llama_process = start_llama_server()
+    if llama_process:
+        import time
+        print("Waiting for server to fully initialize...")
+        time.sleep(4)
+
     # Run connection tests
     if not test_connections():
         print("\n⚠️  Some systems are not fully operational.")
@@ -787,82 +863,90 @@ async def main():
     
     # Initialize conversation state
     state = {"messages": []}
-    
-    while True:
-        # Wait for any ongoing speech to finish before accepting input
-        if tts:
-            tts.wait_for_speech()
-        
-        # Get user input
-        user_input = input("You: ").strip()
-        
-        if user_input.lower() in ['exit', 'quit', 'bye', 'goodbye']:
-            farewell = "Very well, Sir. I'll be here if you need me. Have a pleasant evening."
-            print(f"\nJARVIS: {farewell}")
+    try:
+        while True:
+            # Wait for any ongoing speech to finish before accepting input
             if tts:
-                tts.speak(farewell)
                 tts.wait_for_speech()
-            if reminder_service:
-                reminder_service.stop()
-            break
             
-        if not user_input:
-            empty_response = "I'm listening, Sir. Please feel free to share your request."
-            print(f"JARVIS: {empty_response}\n")
-            if tts:
-                tts.speak(empty_response)
-            continue
+            # Get user input
+            user_input = input("You: ").strip()
             
-        # Add user message to state
-        state["messages"].append(HumanMessage(content=user_input))
-        
-        try:
-            # Process through the graph
-            result = await app.ainvoke(state)
-            
-            # Update state with full message history
-            state = result
-            
-            # Get the last AI message (excluding ones with only tool calls)
-            ai_response = None
-            for msg in reversed(result["messages"]):
-                if isinstance(msg, AIMessage):
-                    # Check if it has content (not just tool calls)
-                    if msg.content and not (hasattr(msg, "tool_calls") and msg.tool_calls):
-                        ai_response = msg.content
-                        break
-                    elif hasattr(msg, "content") and msg.content and hasattr(msg, "tool_calls") and not msg.tool_calls:
-                        # Message has content but no tool calls
-                        ai_response = msg.content
-                        break
-            
-            if ai_response:
-                # Print response
-                print(f"\nJARVIS: {ai_response}\n")
-                
-                # Speak response
+            if user_input.lower() in ['exit', 'quit', 'bye', 'goodbye']:
+                farewell = "Very well, Sir. I'll be here if you need me. Have a pleasant evening."
+                print(f"\nJARVIS: {farewell}")
                 if tts:
-                    tts.speak(ai_response)
-            else:
-                # Try to get any AI message content as fallback
-                for msg in reversed(result["messages"]):
-                    if isinstance(msg, AIMessage) and msg.content:
-                        ai_response = msg.content
-                        print(f"\nJARVIS: {ai_response}\n")
-                        if tts:
-                            tts.speak(ai_response)
-                        break
-                else:
-                    logger.warning("⚠️ No AI response message found in result")
-                    logger.info("Message types in result:")
-                    for i, msg in enumerate(result["messages"][-5:]):
-                        logger.info(f"  {i}: {type(msg).__name__} - Has content: {bool(getattr(msg, 'content', None))} - Has tool_calls: {bool(getattr(msg, 'tool_calls', None))}")
+                    tts.speak(farewell)
+                    tts.wait_for_speech()
+                if reminder_service:
+                    reminder_service.stop()
+                break
+                
+            if not user_input:
+                empty_response = "I'm listening, Sir. Please feel free to share your request."
+                print(f"JARVIS: {empty_response}\n")
+                if tts:
+                    tts.speak(empty_response)
+                continue
+                
+            # Add user message to state
+            state["messages"].append(HumanMessage(content=user_input))
             
-        except Exception as e:
-            error_response = f"I apologise, Sir, but I've encountered an unexpected error: {str(e)}. Shall I attempt to diagnose the issue?"
-            print(f"\nJARVIS: {error_response}\n")
-            if tts:
-                tts.speak(error_response)
+            try:
+                # Process through the graph
+                result = await app.ainvoke(state)
+                
+                # Update state with full message history
+                state = result
+                
+                # Get the last AI message (excluding ones with only tool calls)
+                ai_response = None
+                for msg in reversed(result["messages"]):
+                    if isinstance(msg, AIMessage):
+                        # Check if it has content (not just tool calls)
+                        if msg.content and not (hasattr(msg, "tool_calls") and msg.tool_calls):
+                            ai_response = msg.content
+                            break
+                        elif hasattr(msg, "content") and msg.content and hasattr(msg, "tool_calls") and not msg.tool_calls:
+                            # Message has content but no tool calls
+                            ai_response = msg.content
+                            break
+                
+                if ai_response:
+                    # Print response
+                    print(f"\nJARVIS: {ai_response}\n")
+                    
+                    # Speak response
+                    if tts:
+                        tts.speak(ai_response)
+                else:
+                    # Try to get any AI message content as fallback
+                    for msg in reversed(result["messages"]):
+                        if isinstance(msg, AIMessage) and msg.content:
+                            ai_response = msg.content
+                            print(f"\nJARVIS: {ai_response}\n")
+                            if tts:
+                                tts.speak(ai_response)
+                            break
+                    else:
+                        logger.warning("⚠️ No AI response message found in result")
+                        logger.info("Message types in result:")
+                        for i, msg in enumerate(result["messages"][-5:]):
+                            logger.info(f"  {i}: {type(msg).__name__} - Has content: {bool(getattr(msg, 'content', None))} - Has tool_calls: {bool(getattr(msg, 'tool_calls', None))}")
+                
+            except Exception as e:
+                error_response = f"I apologise, Sir, but I've encountered an unexpected error: {str(e)}. Shall I attempt to diagnose the issue?"
+                print(f"\nJARVIS: {error_response}\n")
+                if tts:
+                    tts.speak(error_response)
+    finally:
+        # Cleanup
+        if reminder_service:
+            reminder_service.stop()
+        if llama_process:
+            print("\nShutting down local LLM server...")
+            llama_process.terminate()
+            llama_process.wait(timeout=5)
 
 if __name__ == "__main__":
     # First run a detailed connection test
