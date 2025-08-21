@@ -27,10 +27,10 @@ echo ""
 # Start llama-server with the specified configuration
 llama-server \
     --model "$MODEL_PATH" \
-    -c 8096 \
+    -c 0 \
     -fa \
     --jinja \
-    --reasoning-format none \
+    --reasoning-format deepseek \
     -ngl 99 \
     --host 0.0.0.0 \
     --port "$PORT" \
