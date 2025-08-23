@@ -8,23 +8,33 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Set
 from jarvis_calendar import JARVISCalendar
-from jarvis_tts_fixed import JARVISStreamingTTS
+# TTS will be passed in as instance, no need to import specific implementation
 
 logger = logging.getLogger(__name__)
 
 class JARVISReminder:
     """Background service for meeting reminders"""
     
-    def __init__(self, tts_host: str, check_interval: int = 60):
+    def __init__(self, tts_instance=None, tts_host: Optional[str] = None, check_interval: int = 60):
         """
         Initialize reminder service
         
         Args:
-            tts_host: URL of the TTS server
+            tts_instance: Pre-initialized TTS instance (preferred)
+            tts_host: URL of the TTS server (legacy, used if tts_instance not provided)
             check_interval: How often to check for meetings (seconds)
         """
         self.calendar = None
-        self.tts = JARVISStreamingTTS(tts_host)
+        
+        # Use provided TTS instance or create one (for backward compatibility)
+        if tts_instance:
+            self.tts = tts_instance
+        elif tts_host:
+            # Import only if needed for backward compatibility
+            from jarvis_tts_fixed import JARVISStreamingTTS
+            self.tts = JARVISStreamingTTS(tts_host)
+        else:
+            self.tts = None
         self.check_interval = check_interval
         self.running = False
         self.thread = None

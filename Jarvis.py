@@ -3,6 +3,7 @@ import asyncio
 import requests
 from typing import TypedDict, Annotated, Sequence, List, Optional, Literal
 from jarvis_tts_fixed import JARVISStreamingTTS
+from jarvis_hume_tts import JARVISHumeTTS
 from jarvis_calendar import JARVISCalendar, get_calendar_summary, check_upcoming_meeting
 from jarvis_reminder import JARVISReminder
 from langchain_ollama import ChatOllama
@@ -35,6 +36,9 @@ TTS_HOST = "http://10.0.0.108:8001"     # Chatterbox TTS server
 MODEL_NAME = "gpt-oss:20b"  # Or whatever model you have in Ollama
 MODEL_PATH = "../../local-llm-models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf"
 ENABLE_TTS = True  # Toggle TTS on/off
+TTS_ENGINE = "hume"  # Options: "local" or "hume" - choose which TTS engine to use
+HUME_API_KEY = os.getenv("HUME_API_KEY")  # Set your Hume API key as environment variable
+HUME_VOICE_NAME = os.getenv("HUME_VOICE_NAME", None)  # Optional: cloned voice name (requires Creator plan)
 WEATHER_API_KEY = ""  # Add your OpenWeatherMap API key if you have one
 
 # JARVIS System Prompt
@@ -681,34 +685,35 @@ def test_connections():
         return False
     
     # Test Chatterbox TTS
-    print(f"\n🔊 Testing voice synthesis at: {TTS_HOST}")
-    try:
-        response = requests.get(f"{TTS_HOST}/health", timeout=5)
-        if response.status_code == 200:
-            health = response.json()
-            print(f"✅ Voice synthesis online")
-            print(f"   Processing unit: {health.get('device', 'unknown')}")
+    if TTS_ENGINE == "local":
+        print(f"\n🔊 Testing voice synthesis at: {TTS_HOST}")
+        try:
+            response = requests.get(f"{TTS_HOST}/health", timeout=5)
+            if response.status_code == 200:
+                health = response.json()
+                print(f"✅ Voice synthesis online")
+                print(f"   Processing unit: {health.get('device', 'unknown')}")
+                
+                # Test TTS generation
+                if ENABLE_TTS:
+                    print("🧪 Testing voice generation...")
+                    test_response = requests.post(
+                        f"{TTS_HOST}/tts",
+                        json={"text": "Systems check complete. All systems operational."},
+                        timeout=10
+                    )
+                    if test_response.status_code == 200:
+                        print("✅ Voice synthesis operational")
+                    else:
+                        print(f"⚠️  Voice synthesis test failed: {test_response.status_code}")
+            else:
+                print(f"❌ Voice system responded with status {response.status_code}")
+                ENABLE_TTS = False
+        except Exception as e:
+            print(f"⚠️  Voice system connection failed: {e}")
+            print("   Continuing without voice output...")
             
-            # Test TTS generation
-            if ENABLE_TTS:
-                print("🧪 Testing voice generation...")
-                test_response = requests.post(
-                    f"{TTS_HOST}/tts",
-                    json={"text": "Systems check complete. All systems operational."},
-                    timeout=10
-                )
-                if test_response.status_code == 200:
-                    print("✅ Voice synthesis operational")
-                else:
-                    print(f"⚠️  Voice synthesis test failed: {test_response.status_code}")
-        else:
-            print(f"❌ Voice system responded with status {response.status_code}")
             ENABLE_TTS = False
-    except Exception as e:
-        print(f"⚠️  Voice system connection failed: {e}")
-        print("   Continuing without voice output...")
-        
-        ENABLE_TTS = False
     
     return True
 
@@ -840,16 +845,41 @@ async def main():
         print("Shall I proceed with available functionality, Sir?")
     
     # Initialize TTS
-    tts = JARVISStreamingTTS(TTS_HOST) if ENABLE_TTS else None
+    tts = None
+    if ENABLE_TTS:
+        if TTS_ENGINE == "hume":
+            if not HUME_API_KEY:
+                print("⚠️  HUME_API_KEY not found. Please set it as an environment variable.")
+                print("   Falling back to local TTS...")
+                tts = JARVISStreamingTTS(TTS_HOST)
+            else:
+                try:
+                    tts = JARVISHumeTTS(HUME_API_KEY, voice_name=HUME_VOICE_NAME)
+                    if HUME_VOICE_NAME:
+                        print(f"🎤 Using Hume AI TTS engine with cloned voice: {HUME_VOICE_NAME}")
+                    else:
+                        print("🎤 Using Hume AI TTS engine with voice description")
+                    # Give Hume time to initialize
+                    import time
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"⚠️  Failed to initialize Hume TTS: {e}")
+                    print("   Falling back to local TTS...")
+                    tts = JARVISStreamingTTS(TTS_HOST)
+        else:
+            tts = JARVISStreamingTTS(TTS_HOST)
+            print("🎤 Using local TTS engine")
     
     # Initialize reminder service
     reminder_service = None
-    try:
-        reminder_service = JARVISReminder(TTS_HOST)
-        reminder_service.start()
-        print("📅 Meeting reminder service activated")
-    except Exception as e:
-        print(f"⚠️  Could not start reminder service: {e}")
+    if tts:  # Only start reminder service if TTS is available
+        try:
+            # Pass the already-initialized TTS instance to the reminder service
+            reminder_service = JARVISReminder(tts_instance=tts)
+            reminder_service.start()
+            print("📅 Meeting reminder service activated")
+        except Exception as e:
+            print(f"⚠️  Could not start reminder service: {e}")
     
     print("\n" + "=" * 60)
     
