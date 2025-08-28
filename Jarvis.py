@@ -49,7 +49,7 @@ TTS_HOST = f"http://{REMOTE_HOST}:8001" if TTS_MODE == "remote" else "http://loc
 # Model configuration
 MODEL_NAME = "gpt-oss:20b"  # Or whatever model you have in Ollama
 MODEL_PATH = "../../local-llm-models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf"
-REMOTE_MODEL_PATH = "/home/nicholas/models/gpt-oss-20b-mxfp4.gguf"  # Path on remote server
+REMOTE_MODEL_PATH = "/home/nicholas/local-llm-models/ggml-org/gpt-oss-20b-mxfp4.gguf"  # Path on remote server
 
 # TTS configuration
 ENABLE_TTS = True  # Toggle TTS on/off
