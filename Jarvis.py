@@ -55,7 +55,7 @@ REMOTE_MODEL_PATH = "/home/nicholas/local-llm-models/ggml-org/gpt-oss-20b-GGUF/g
 ENABLE_TTS = True  # Toggle TTS on/off
 TTS_ENGINE = "hume"  # Options: "local" or "hume" - choose which TTS engine to use
 HUME_API_KEY = os.getenv("HUME_API_KEY")  # Set your Hume API key as environment variable
-HUME_VOICE_NAME = os.getenv("HUME_VOICE_NAME", "Jarvis")  # Optional: cloned voice name (requires Creator plan)
+HUME_VOICE_NAME = os.getenv("HUME_VOICE_NAME", "Jarvis2")  # Optional: cloned voice name (requires Creator plan)
 WEATHER_API_KEY = ""  # Add your OpenWeatherMap API key if you have one
 
 # Track processes for cleanup

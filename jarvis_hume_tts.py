@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class JARVISHumeTTS:
     """Handle text-to-speech for JARVIS using Hume AI"""
     
-    def __init__(self, api_key: Optional[str] = None, voice_name: Optional[str] = "Jarvis"):
+    def __init__(self, api_key: Optional[str] = None, voice_name: Optional[str] = "Jarvis2"):
         """
         Initialize Hume TTS
         
