@@ -1,92 +1,112 @@
 #!/bin/bash
-# Start JARVIS with local TTS server on Mac
 
-echo "🚀 Starting JARVIS System..."
-echo "================================"
+# JARVIS Launcher Script
+# Supports both local and remote LLM/TTS configurations
 
-# Function to cleanup on exit
-cleanup() {
-    echo -e "\n🛑 Shutting down JARVIS systems..."
-    
-    # Kill TTS server if running
-    if [ ! -z "$TTS_PID" ]; then
-        echo "   Stopping TTS server (PID: $TTS_PID)..."
-        kill $TTS_PID 2>/dev/null
-    fi
-    
-    # Kill any remaining Python processes related to JARVIS
-    pkill -f "serve_tts_mac.py" 2>/dev/null
-    
-    echo "✅ JARVIS shutdown complete"
-    exit 0
-}
+# Default values
+LLM_MODE="local"
+TTS_MODE="local"
 
-# Set trap for cleanup on script exit
-trap cleanup EXIT INT TERM
-
-# Check if we're on macOS
-if [[ "$OSTYPE" != "darwin"* ]]; then
-    echo "⚠️  Warning: This script is optimized for macOS"
-    echo "   TTS performance may be reduced on other platforms"
-fi
-
-# Check for required Python packages
-echo "🔍 Checking dependencies..."
-python3 -c "import chatterbox" 2>/dev/null
-if [ $? -ne 0 ]; then
-    echo "❌ Chatterbox not installed!"
-    echo "   Please run: pip install chatterbox-tts"
-    exit 1
-fi
-
-python3 -c "import torch" 2>/dev/null
-if [ $? -ne 0 ]; then
-    echo "❌ PyTorch not installed!"
-    echo "   Please run: pip install torch torchaudio"
-    exit 1
-fi
-
-# Check if MPS is available (Apple Silicon)
-echo "🍎 Checking for Apple Silicon acceleration..."
-python3 -c "import torch; print('   ✅ Metal Performance Shaders available!' if torch.backends.mps.is_available() else '   ℹ️  Using CPU (MPS not available)')"
-
-# Start TTS server in background
-echo -e "\n📢 Starting TTS server..."
-python3 serve_tts_mac.py > tts_server.log 2>&1 &
-TTS_PID=$!
-
-# Wait for TTS server to start
-echo "   Waiting for TTS server to initialize..."
-for i in {1..30}; do
-    curl -s http://127.0.0.1:8001/health > /dev/null 2>&1
-    if [ $? -eq 0 ]; then
-        echo "   ✅ TTS server ready!"
-        break
-    fi
-    sleep 1
-    
-    # Check if process is still running
-    if ! kill -0 $TTS_PID 2>/dev/null; then
-        echo "   ❌ TTS server failed to start!"
-        echo "   Check tts_server.log for details"
-        exit 1
-    fi
-    
-    if [ $i -eq 30 ]; then
-        echo "   ⚠️  TTS server slow to start, proceeding anyway..."
-    fi
+# Parse command-line arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --llm-mode)
+            LLM_MODE="$2"
+            shift 2
+            ;;
+        --tts-mode)
+            TTS_MODE="$2"
+            shift 2
+            ;;
+        --remote)
+            # Convenience option to run everything remotely
+            LLM_MODE="remote"
+            TTS_MODE="remote"
+            shift
+            ;;
+        --local)
+            # Convenience option to run everything locally
+            LLM_MODE="local"
+            TTS_MODE="local"
+            shift
+            ;;
+        --help)
+            echo "JARVIS Launcher Script"
+            echo ""
+            echo "Usage: $0 [options]"
+            echo ""
+            echo "Options:"
+            echo "  --llm-mode <local|remote>  Set LLM server mode (default: local)"
+            echo "  --tts-mode <local|remote>  Set TTS server mode (default: local)"
+            echo "  --remote                    Run both LLM and TTS remotely"
+            echo "  --local                     Run both LLM and TTS locally"
+            echo "  --help                      Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  $0                          # Run everything locally"
+            echo "  $0 --remote                 # Run everything on remote server"
+            echo "  $0 --llm-mode remote        # Run LLM remotely, TTS locally"
+            echo "  $0 --tts-mode remote        # Run TTS remotely, LLM locally"
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Use --help for usage information"
+            exit 1
+            ;;
+    esac
 done
 
-# Display TTS server status
-echo "   TTS Server PID: $TTS_PID"
-curl -s http://127.0.0.1:8001/health | python3 -m json.tool 2>/dev/null || echo "   (Unable to get server status)"
+# Validate modes
+if [[ "$LLM_MODE" != "local" && "$LLM_MODE" != "remote" ]]; then
+    echo "Error: LLM_MODE must be 'local' or 'remote'"
+    exit 1
+fi
 
-# Start JARVIS
-echo -e "\n🤖 Starting JARVIS..."
-echo "================================"
+if [[ "$TTS_MODE" != "local" && "$TTS_MODE" != "remote" ]]; then
+    echo "Error: TTS_MODE must be 'local' or 'remote'"
+    exit 1
+fi
+
+# Export environment variables for jarvis.py
+export JARVIS_LLM_MODE="$LLM_MODE"
+export JARVIS_TTS_MODE="$TTS_MODE"
+
+# Display configuration
+echo "> Starting JARVIS with configuration:"
+echo "   LLM Mode: $LLM_MODE"
+echo "   TTS Mode: $TTS_MODE"
 echo ""
 
-# Run JARVIS Mac version (this will block until user exits)
-python3 Jarvis_mac.py
+# Check SSH connectivity if using remote mode
+if [[ "$LLM_MODE" == "remote" || "$TTS_MODE" == "remote" ]]; then
+    echo "= Checking SSH connectivity to 10.0.0.108..."
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes nicholas@10.0.0.108 "echo 'SSH connection successful'" > /dev/null 2>&1; then
+        echo " SSH connection established"
+    else
+        echo "L Cannot connect to remote server (10.0.0.108)"
+        echo "Please ensure:"
+        echo "  1. The remote server is accessible"
+        echo "  2. SSH key authentication is configured"
+        echo "  3. You can connect with: ssh nicholas@10.0.0.108"
+        exit 1
+    fi
+fi
 
-# Cleanup will be called automatically on exit
+# Activate virtual environment if it exists
+if [ -d "venv" ]; then
+    echo "= Activating Python virtual environment..."
+    source venv/bin/activate
+elif [ -d "../venv" ]; then
+    echo "= Activating Python virtual environment..."
+    source ../venv/bin/activate
+fi
+
+# Run JARVIS
+echo "=� Launching JARVIS..."
+echo "=" * 60
+python jarvis.py
+
+# Cleanup on exit
+echo ""
+echo "=K JARVIS shutdown complete"

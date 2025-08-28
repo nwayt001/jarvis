@@ -25,21 +25,43 @@ import subprocess
 import shlex
 from pathlib import Path
 import re
+from dotenv import load_dotenv
+# Load the environment variables from the .env file
+load_dotenv()
 
 # Configure logging
 logging.basicConfig(level=logging.WARNING)  # Changed to WARNING to reduce noise
 logger = logging.getLogger(__name__)
 
 # Configuration
-LLAMA_CPP_HOST = "http://localhost:8080" # Will either be a local or remote Llama.cpp server
-TTS_HOST = "http://10.0.0.108:8001"     # Chatterbox TTS server
+# Server modes - can be "local" or "remote"
+LLM_MODE = os.getenv("JARVIS_LLM_MODE", "local")  # "local" or "remote"
+TTS_MODE = os.getenv("JARVIS_TTS_MODE", "local")  # "local" or "remote"
+
+# Remote server configuration
+REMOTE_HOST = "10.0.0.108"
+REMOTE_USER = "nicholas"  # Username for SSH connection
+
+# Dynamic host configuration based on mode
+LLAMA_CPP_HOST = f"http://{REMOTE_HOST}:8080" if LLM_MODE == "remote" else "http://localhost:8080"
+TTS_HOST = f"http://{REMOTE_HOST}:8001" if TTS_MODE == "remote" else "http://localhost:8001"
+
+# Model configuration
 MODEL_NAME = "gpt-oss:20b"  # Or whatever model you have in Ollama
 MODEL_PATH = "../../local-llm-models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf"
+REMOTE_MODEL_PATH = "/home/nicholas/models/gpt-oss-20b-mxfp4.gguf"  # Path on remote server
+
+# TTS configuration
 ENABLE_TTS = True  # Toggle TTS on/off
 TTS_ENGINE = "hume"  # Options: "local" or "hume" - choose which TTS engine to use
 HUME_API_KEY = os.getenv("HUME_API_KEY")  # Set your Hume API key as environment variable
-HUME_VOICE_NAME = os.getenv("HUME_VOICE_NAME", None)  # Optional: cloned voice name (requires Creator plan)
+HUME_VOICE_NAME = os.getenv("HUME_VOICE_NAME", "Jarvis")  # Optional: cloned voice name (requires Creator plan)
 WEATHER_API_KEY = ""  # Add your OpenWeatherMap API key if you have one
+
+# Track processes for cleanup
+remote_llama_pid = None
+remote_tts_pid = None
+local_tts_process = None
 
 # JARVIS System Prompt
 JARVIS_PROMPT = """You are JARVIS (Just A Rather Very Intelligent System), Tony Stark's AI assistant from Iron Man.
@@ -597,8 +619,179 @@ tools = [web_search, get_weather, execute_bash, read_file, write_file, list_dire
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], operator.add]
 
+def start_remote_llama_server():
+    """Start llama-server on the remote Linux server"""
+    global remote_llama_pid
+    print(f"🚀 Starting remote LLM server on {REMOTE_HOST}...")
+    
+    try:
+        # First check if llama-server is already running on remote
+        ssh_check = f"ssh {REMOTE_USER}@{REMOTE_HOST} 'pgrep -f llama-server'"
+        check_result = subprocess.run(ssh_check, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if check_result.returncode == 0 and check_result.stdout.strip():
+            print(f"✅ Remote LLM server already running (PID: {check_result.stdout.strip()})")
+            remote_llama_pid = check_result.stdout.strip()
+            return True
+        
+        # Build the remote llama-server command
+        remote_cmd = (
+            f"nohup llama-server "
+            f"--model {REMOTE_MODEL_PATH} "
+            f"-c 0 -fa --jinja --reasoning-format deepseek "
+            f"-ngl 99 --host 0.0.0.0 --port 8080 "
+            f"> /tmp/llama-server.log 2>&1 & echo $!"
+        )
+        
+        # Start llama-server on remote server
+        ssh_cmd = f"ssh {REMOTE_USER}@{REMOTE_HOST} '{remote_cmd}'"
+        print(f"   Command: {ssh_cmd}")
+        
+        result = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and result.stdout.strip():
+            remote_llama_pid = result.stdout.strip()
+            print(f"✅ Remote LLM server started (PID: {remote_llama_pid})")
+            
+            # Wait for server to be ready
+            import time
+            time.sleep(5)
+            
+            # Verify it's running
+            try:
+                response = requests.get(f"{LLAMA_CPP_HOST}/health", timeout=5)
+                if response.status_code == 200:
+                    print("✅ Remote LLM server is responding")
+                    return True
+            except:
+                print("⚠️  Remote server may still be starting...")
+                return True
+        else:
+            print(f"❌ Failed to start remote LLM server: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error starting remote LLM server: {e}")
+        return False
+
+def start_remote_tts_server():
+    """Start TTS server on the remote Linux server"""
+    global remote_tts_pid
+    print(f"🔊 Starting remote TTS server on {REMOTE_HOST}...")
+    
+    try:
+        # First check if TTS server is already running
+        ssh_check = f"ssh {REMOTE_USER}@{REMOTE_HOST} 'pgrep -f serve_tts_streaming'"
+        check_result = subprocess.run(ssh_check, shell=True, capture_output=True, text=True, timeout=10)
+        
+        if check_result.returncode == 0 and check_result.stdout.strip():
+            print(f"✅ Remote TTS server already running (PID: {check_result.stdout.strip()})")
+            remote_tts_pid = check_result.stdout.strip()
+            return True
+        
+        # Start the TTS server on remote
+        remote_cmd = (
+            f"cd /home/{REMOTE_USER}/jarvis && "
+            f"nohup python serve_tts_streaming.py "
+            f"> /tmp/tts-server.log 2>&1 & echo $!"
+        )
+        
+        ssh_cmd = f"ssh {REMOTE_USER}@{REMOTE_HOST} '{remote_cmd}'"
+        print(f"   Command: {ssh_cmd}")
+        
+        result = subprocess.run(ssh_cmd, shell=True, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0 and result.stdout.strip():
+            remote_tts_pid = result.stdout.strip()
+            print(f"✅ Remote TTS server started (PID: {remote_tts_pid})")
+            
+            # Wait for server to be ready
+            import time
+            time.sleep(8)  # TTS server takes longer to initialize
+            
+            # Verify it's running
+            try:
+                response = requests.get(f"{TTS_HOST}/health", timeout=10)
+                if response.status_code == 200:
+                    print("✅ Remote TTS server is responding")
+                    return True
+            except:
+                print("⚠️  Remote TTS server may still be starting...")
+                return True
+        else:
+            print(f"❌ Failed to start remote TTS server: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"❌ Error starting remote TTS server: {e}")
+        return False
+
+def stop_remote_servers():
+    """Stop remote servers cleanly"""
+    global remote_llama_pid, remote_tts_pid
+    
+    if remote_llama_pid:
+        print(f"Stopping remote LLM server (PID: {remote_llama_pid})...")
+        ssh_cmd = f"ssh {REMOTE_USER}@{REMOTE_HOST} 'kill {remote_llama_pid} 2>/dev/null'"
+        subprocess.run(ssh_cmd, shell=True, timeout=5)
+        remote_llama_pid = None
+    
+    if remote_tts_pid:
+        print(f"Stopping remote TTS server (PID: {remote_tts_pid})...")
+        ssh_cmd = f"ssh {REMOTE_USER}@{REMOTE_HOST} 'kill {remote_tts_pid} 2>/dev/null'"
+        subprocess.run(ssh_cmd, shell=True, timeout=5)
+        remote_tts_pid = None
+
+def start_local_tts_server():
+    """Start TTS server locally on Mac"""
+    global local_tts_process
+    print("🔊 Starting local TTS server (serve_tts_mac.py)...")
+    
+    try:
+        # Use serve_tts_mac.py for local Mac TTS
+        tts_script = "serve_tts_mac.py"
+        
+        if not Path(tts_script).exists():
+            print(f"❌ TTS server script not found: {tts_script}")
+            print("   Please ensure serve_tts_mac.py is in the current directory")
+            return None
+        
+        # Build the command to start local TTS server
+        cmd = ["python", tts_script]
+        
+        print(f"   Command: {' '.join(cmd)}")
+        
+        # Start TTS server as a subprocess
+        local_tts_process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # Wait for server to initialize
+        import time
+        time.sleep(8)  # TTS server takes time to load model
+        
+        # Check if server is running
+        try:
+            response = requests.get(f"{TTS_HOST}/health", timeout=10)
+            if response.status_code == 200:
+                print("✅ Local TTS server started successfully")
+                return local_tts_process
+        except:
+            print("⚠️  TTS server may still be starting...")
+            return local_tts_process
+            
+    except Exception as e:
+        print(f"❌ Failed to start local TTS server: {e}")
+        return None
+
 def start_llama_server():
     """Start llama-server with the specified configuration"""
+    if LLM_MODE == "remote":
+        return start_remote_llama_server()
+    
     print("🚀 Starting local LLM server...")
     
     # Get the actual model path from user input or environment variable
@@ -661,13 +854,15 @@ def test_connections():
     global ENABLE_TTS
     """Test connections to both Ollama and Chatterbox"""
     print("🔧 Initiating JARVIS systems diagnostic...")
+    print(f"   LLM Mode: {LLM_MODE} | TTS Mode: {TTS_MODE}")
     
    # Test llama-server
-    print(f"\n📡 Testing neural network connection at: {LLAMA_CPP_HOST}")
+    server_location = "remote" if LLM_MODE == "remote" else "local"
+    print(f"\n📡 Testing {server_location} neural network connection at: {LLAMA_CPP_HOST}")
     try:
         response = requests.get(f"{LLAMA_CPP_HOST}/health", timeout=5)
         if response.status_code == 200:
-            print("✅ Neural network connection established")
+            print(f"✅ {server_location.capitalize()} neural network connection established")
             
             # Get model info
             models_response = requests.get(f"{LLAMA_CPP_HOST}/v1/models", timeout=5)
@@ -680,13 +875,17 @@ def test_connections():
             return False
     except Exception as e:
         print(f"❌ Neural network connection failed: {e}")
-        print("\n💡 Tip: Make sure llama-server is running with:")
-        print(f"   llama-server --model {MODEL_PATH} -c 0 -fa --jinja --reasoning-format none -ngl 99")
+        if LLM_MODE == "remote":
+            print(f"\n💡 Tip: Make sure llama-server is running on {REMOTE_HOST} or will be started automatically")
+        else:
+            print("\n💡 Tip: Make sure llama-server is running locally with:")
+            print(f"   llama-server --model {MODEL_PATH} -c 0 -fa --jinja --reasoning-format none -ngl 99")
         return False
     
     # Test Chatterbox TTS
     if TTS_ENGINE == "local":
-        print(f"\n🔊 Testing voice synthesis at: {TTS_HOST}")
+        tts_location = "remote" if TTS_MODE == "remote" else "local"
+        print(f"\n🔊 Testing {tts_location} voice synthesis at: {TTS_HOST}")
         try:
             response = requests.get(f"{TTS_HOST}/health", timeout=5)
             if response.status_code == 200:
@@ -831,27 +1030,59 @@ async def main():
     print("🤖 JARVIS v1.0 - Just A Rather Very Intelligent System")
     print("=" * 60)
     
-    #start llama-server automatically
+    # Start servers based on configuration
     llama_process = None
-    llama_process = start_llama_server()
-    if llama_process:
-        import time
-        print("Waiting for server to fully initialize...")
-        time.sleep(4)
+    
+    # Start LLM server
+    if LLM_MODE == "remote":
+        if start_remote_llama_server():
+            import time
+            print("Waiting for remote LLM server to fully initialize...")
+            time.sleep(4)
+        else:
+            print("⚠️  Failed to start remote LLM server, attempting to continue...")
+    else:
+        llama_process = start_llama_server()
+        if llama_process:
+            import time
+            print("Waiting for local server to fully initialize...")
+            time.sleep(4)
+    
+    # Start TTS server based on configuration
+    if TTS_ENGINE == "local":
+        # Using local TTS engine (not Hume)
+        if TTS_MODE == "remote":
+            # Start TTS server on remote Linux machine
+            if start_remote_tts_server():
+                print("Remote TTS server started successfully")
+            else:
+                print("⚠️  Failed to start remote TTS server, TTS may not be available")
+        elif TTS_MODE == "local":
+            # Start TTS server locally on Mac
+            if start_local_tts_server():
+                print("Local TTS server started successfully")
+            else:
+                print("⚠️  Failed to start local TTS server, TTS may not be available")
+    elif TTS_ENGINE == "hume":
+        # Using Hume cloud TTS - no server needed
+        print("🌐 Using Hume cloud TTS service (no local/remote server needed)")
 
     # Run connection tests
     if not test_connections():
         print("\n⚠️  Some systems are not fully operational.")
         print("Shall I proceed with available functionality, Sir?")
     
-    # Initialize TTS
+    # Initialize TTS based on engine type
     tts = None
     if ENABLE_TTS:
         if TTS_ENGINE == "hume":
+            # Using Hume cloud TTS
             if not HUME_API_KEY:
                 print("⚠️  HUME_API_KEY not found. Please set it as an environment variable.")
-                print("   Falling back to local TTS...")
+                print("   Falling back to local/remote TTS server...")
                 tts = JARVISStreamingTTS(TTS_HOST)
+                tts_mode_str = "remote" if TTS_MODE == "remote" else "local"
+                print(f"🎤 Using {tts_mode_str} TTS server as fallback")
             else:
                 try:
                     tts = JARVISHumeTTS(HUME_API_KEY, voice_name=HUME_VOICE_NAME)
@@ -864,11 +1095,15 @@ async def main():
                     time.sleep(2)
                 except Exception as e:
                     print(f"⚠️  Failed to initialize Hume TTS: {e}")
-                    print("   Falling back to local TTS...")
+                    print("   Falling back to local/remote TTS server...")
                     tts = JARVISStreamingTTS(TTS_HOST)
-        else:
+                    tts_mode_str = "remote" if TTS_MODE == "remote" else "local"
+                    print(f"🎤 Using {tts_mode_str} TTS server as fallback")
+        elif TTS_ENGINE == "local":
+            # Using local TTS engine (server-based, either local or remote)
             tts = JARVISStreamingTTS(TTS_HOST)
-            print("🎤 Using local TTS engine")
+            tts_mode_str = "remote" if TTS_MODE == "remote" else "local"
+            print(f"🎤 Using {tts_mode_str} TTS server (Chatterbox)")
     
     # Initialize reminder service
     reminder_service = None
@@ -973,10 +1208,28 @@ async def main():
         # Cleanup
         if reminder_service:
             reminder_service.stop()
+        
+        # Stop servers based on mode
+        if LLM_MODE == "remote" or TTS_MODE == "remote":
+            print("\nShutting down remote servers...")
+            stop_remote_servers()
+        
+        # Stop local servers
         if llama_process:
             print("\nShutting down local LLM server...")
             llama_process.terminate()
-            llama_process.wait(timeout=5)
+            try:
+                llama_process.wait(timeout=5)
+            except:
+                pass
+        
+        if local_tts_process:
+            print("\nShutting down local TTS server...")
+            local_tts_process.terminate()
+            try:
+                local_tts_process.wait(timeout=5)
+            except:
+                pass
 
 if __name__ == "__main__":
     # First run a detailed connection test
