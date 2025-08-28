@@ -49,7 +49,7 @@ TTS_HOST = f"http://{REMOTE_HOST}:8001" if TTS_MODE == "remote" else "http://loc
 # Model configuration
 MODEL_NAME = "gpt-oss:20b"  # Or whatever model you have in Ollama
 MODEL_PATH = "../../local-llm-models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf"
-REMOTE_MODEL_PATH = "/home/nicholas/local-llm-models/ggml-org/gpt-oss-20b-mxfp4.gguf"  # Path on remote server
+REMOTE_MODEL_PATH = "/home/nicholas/local-llm-models/ggml-org/gpt-oss-20b-GGUF/gpt-oss-20b-mxfp4.gguf"  # Path on remote server
 
 # TTS configuration
 ENABLE_TTS = True  # Toggle TTS on/off
@@ -636,13 +636,14 @@ def start_remote_llama_server():
         
         # Build the remote llama-server command
         remote_cmd = (
-            f"nohup llama-server "
-            f"--model {REMOTE_MODEL_PATH} "
-            f"-c 0 -fa --jinja --reasoning-format deepseek "
-            f"-ngl 99 --host 0.0.0.0 --port 8080 "
-            f"> /tmp/llama-server.log 2>&1 & echo $!"
+            f'nohup bash -c "source ~/.bashrc; '
+            f'/home/nicholas/llama.cpp/build/bin/llama-server '
+            f'--model {REMOTE_MODEL_PATH} '
+            f'-c 0 -fa --jinja --reasoning-format deepseek '
+            f'-ngl 99 --host 0.0.0.0 --port 8080 '
+            f'> /tmp/llama-server.log 2>&1 & echo $!"'
         )
-        
+
         # Start llama-server on remote server
         ssh_cmd = f"ssh {REMOTE_USER}@{REMOTE_HOST} '{remote_cmd}'"
         print(f"   Command: {ssh_cmd}")
